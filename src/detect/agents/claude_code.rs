@@ -61,6 +61,33 @@ pub(super) fn has_working_chrome(content: &str) -> bool {
         || above_lower.contains("ctrl+c to interrupt")
         || has_running_status_line(above)
         || has_spinner_activity(above)
+        || has_token_counter_spinner(above)
+}
+
+/// Claude Code's live working spinner: "● <Verb>… (<elapsed> · <↑|↓> <n> tokens)".
+///
+/// The "●" (U+25CF) glyph is intentionally NOT added to SPINNER_CHARS: unlike the
+/// flower/asterisk frames, "●" is common in ordinary scrollback (markdown bullets,
+/// pasted output, even quoted copies of this very spinner), so matching it anywhere
+/// above the prompt would hold an idle pane in Working long after the turn ended.
+///
+/// Instead, require the full live-spinner signature (leading "●" + "…" + a token
+/// counter) AND restrict the search to the live region — the last few non-empty
+/// lines just above the prompt box, where only the current spinner sits. A tip or
+/// blank line usually follows the spinner, so this is not strictly the last line.
+fn has_token_counter_spinner(content_above_prompt: &str) -> bool {
+    const LIVE_REGION_LINES: usize = 6;
+    content_above_prompt
+        .lines()
+        .rev()
+        .filter(|line| !line.trim().is_empty())
+        .take(LIVE_REGION_LINES)
+        .any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with('\u{25cf}')
+                && trimmed.contains('\u{2026}')
+                && trimmed.contains("tokens")
+        })
 }
 
 pub(super) fn is_transcript_viewer(content: &str) -> bool {
@@ -363,6 +390,41 @@ mod tests {
         let content = prompt_box_below(
             "● Started. I'll tell you when it finishes.\n\n✻ Crunched for 7s · 1 shell still running\n\n● hi",
         );
+
+        assert_eq!(detect(&content), AgentState::Idle);
+        assert!(!has_working_chrome(&content));
+    }
+
+    #[test]
+    fn token_counter_spinner_in_live_region_is_working() {
+        // Current Claude Code live spinner: "● <Verb>… (Xs · ↓ N tokens)", sitting
+        // a couple of lines above the prompt box (a tip line follows it).
+        let content = prompt_box_below(
+            "⏺ Started a task.\n\n● Thundering… (2m 53s · ↓ 10.8k tokens)\n  ⎿  Tip: anything",
+        );
+
+        assert_eq!(detect(&content), AgentState::Working);
+        assert!(has_working_chrome(&content));
+    }
+
+    #[test]
+    fn quoted_spinner_buried_in_scrollback_is_not_working_chrome() {
+        // A copy of the spinner line sitting far above the prompt (e.g. quoted in a
+        // prior message) must NOT hold an idle pane in Working — only the live
+        // region just above the prompt counts.
+        let content = prompt_box_below(
+            "⏺ Here is the spinner I saw:\n\n● Ebbing… (1m 3s · ↓ 4.1k tokens)\n\nline a\nline b\nline c\nline d\nline e\nline f\n⏺ Done. Waiting for your reply.",
+        );
+
+        assert_eq!(detect(&content), AgentState::Idle);
+        assert!(!has_working_chrome(&content));
+    }
+
+    #[test]
+    fn completed_message_bullet_with_ellipsis_is_not_working_chrome() {
+        // "⏺" (U+23FA) completed bullet must not be mistaken for the "●" spinner,
+        // even when the message text itself ends with an ellipsis.
+        let content = prompt_box_below("⏺ Done thinking about it…");
 
         assert_eq!(detect(&content), AgentState::Idle);
         assert!(!has_working_chrome(&content));
